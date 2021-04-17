@@ -1,0 +1,290 @@
+#pragma version 2
+// check if the app is being created. 
+// if the app id is 0 then it is being created and save creator.
+int 0
+txn ApplicationID
+==
+bz not_creation
+byte "Creator"
+txn Sender
+app_global_put
+// check if 6 args are passed on creation.
+// it will fail if less then 6.
+txn NumAppArgs
+int 6
+==
+bz failed
+byte "FALStartDate"
+txna ApplicationArgs 0
+btoi
+app_global_put
+byte "FALEndDate"
+txna ApplicationArgs 1
+btoi
+app_global_put
+byte "FALListingID"
+txna ApplicationArgs 2
+btoi
+app_global_put
+byte "FALTargetPrice"
+txna ApplicationArgs 3
+btoi
+app_global_put
+byte "ReceiverAddress"
+txna ApplicationArgs 4
+app_global_put
+byte "Total"
+int 0
+app_global_put
+byte "FALCloseDate"
+txna ApplicationArgs 5
+btoi
+app_global_put
+int 1
+return
+not_creation:
+// check if this is deletion transaction
+int DeleteApplication
+txn OnCompletion
+==
+bz not_deletion
+// only the FAL Creator can delete the app
+byte "Creator"
+app_global_get
+txn Sender
+==
+// check the FALCloseDate has passed.
+global LatestTimestamp
+byte "FALCloseDate"
+app_global_get
+>=
+&&
+bz failed
+// if escrow balance is zero we can delete the app.
+// we need to pass the escrow account as an argument.
+int 0
+int 1
+balance
+==
+// if the balance is 0 allow the delete
+bnz finished
+// check if the call is an update.
+int UpdateApplication
+txn OnCompletion
+==
+bz not_update
+// check that the creator is making the call.
+byte "Creator"
+app_global_get
+txn Sender
+==
+// the call should pass the escrow address
+txn NumAppArgs
+int 1
+==
+&&
+bz failed
+// store the escrow address in global state
+byte "Escrow"
+txna ApplicationArgs 0
+app_global_put
+int 1
+return
+not_update:
+// check for closeout
+int CloseOut
+txn OnCompletion
+==
+bnz close_out
+// check if the call is an optin 
+// in this case no params are passed.
+int 0
+txn NumAppArgs
+==
+bz check_parms 
+// check if someone is opting and investing at the same time
+// in this case we need to check the parameters are passed.
+int OptIn
+txn OnCompletion
+==
+bz failed
+int 1
+return
+check_parms:
+// investing
+txna ApplicationArgs 0
+byte "invest"
+==
+bnz donate
+// reclaiming
+txna ApplicationArgs 0
+byte "reclaim" 
+==
+bnz reclaim
+// claiming
+txna ApplicationArgs 0
+byte "claim" 
+==
+bnz claim
+b failed
+
+donate:
+// check dates are valid.
+global LatestTimestamp
+byte "FALStartDate"
+app_global_get
+>=
+global LatestTimestamp
+byte "FALEndDate"
+app_global_get
+<=
+&&
+bz failed
+// check if grouped with two transactions
+global GroupSize
+int 2
+==
+// and the second transaction is a payment
+gtxn 1 TypeEnum
+int 1
+==
+&&
+bz failed
+// verify the escrow is receiving the second payment transaction
+byte "Escrow"
+app_global_get
+gtxn 1 ReceiverAddress
+==
+bz failed
+// increment the total investments
+byte "Total"
+app_global_get
+gtxn 1 Amount
++
+store 1
+byte "Total"
+load 1
+app_global_put
+// increment or set investing amount for the account that is investing
+int 0 //sender
+txn ApplicationID
+byte "investingAmount"
+app_local_get_ex
+// check if a new investor or an existing one
+// and store the value in the investors local storage.
+bz new_giver
+gtxn 1 Amount
++
+store 3
+int 0 //sender
+byte "investingAmount"
+load 3
+app_local_put
+b finished
+new_giver:
+int 0 //sender
+byte "investingAmount"
+gtxn 1 Amount
+app_local_put
+b finished
+
+claim:
+// check there are 2 transactions in the group
+global GroupSize
+int 2
+==
+bz failed
+// check that the receiver of the payment tx
+// is the address stored when the FAL was created
+gtxn 1 ReceiverAddress
+byte "ReceiverAddress"
+app_global_get
+==
+// check the sender of the payment tx is the escrow account
+gtxn 1 Sender
+byte "Escrow"
+app_global_get
+==
+&&
+// check that the FAL endDate has passed
+global LatestTimestamp
+byte "FALEndDate"
+app_global_get
+>
+&&
+bz failed
+// check that the targetPrice was reached
+byte "Total"
+app_global_get
+byte "FALTargetPrice"
+app_global_get
+>=
+bz failed
+b finished
+
+// FAL did not meet targetPrice so people can reclaim investment
+// only 1 relcaim tx is allowed per account
+reclaim:
+// verify there are 2 transactions in the group
+global GroupSize
+int 2
+==
+bz failed
+// check that smart contract caller is the payment transction receiver
+gtxn 1 ReceiverAddress
+gtxn 0 Sender
+==
+// check that payment transaction is from the escrow
+gtxn 1 Sender
+byte "Escrow"
+app_global_get
+==
+&&
+// check that FAL endDate has passed
+global LatestTimestamp
+byte "FALEndDate"
+app_global_get
+>
+&&
+// verify the FAL targetPrice was not met
+byte "Total"
+app_global_get
+byte "FALTargetPrice"
+app_global_get
+<
+&&
+// the escrow  pays the fees 
+// so we need to count the fee during the payment transaction.
+gtxn 1 Amount
+gtxn 1 Fee
++
+int 0
+byte "investingAmount"
+app_local_get
+<=
+&&
+bz failed
+// decrement the given amount of the sender
+int 0
+byte "investingAmount"
+app_local_get
+gtxn 1 Amount
+-
+gtxn 1 Fee
+-
+store 5
+int 0
+byte "investingAmount"
+load 5
+app_local_put
+b finished
+//call if this is a closeout op
+close_out:
+int 1
+return
+failed:
+int 0
+return
+finished:
+int 1
+return
